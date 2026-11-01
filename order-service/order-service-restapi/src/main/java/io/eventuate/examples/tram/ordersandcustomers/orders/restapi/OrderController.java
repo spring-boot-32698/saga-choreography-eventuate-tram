@@ -3,6 +3,7 @@ package io.eventuate.examples.tram.ordersandcustomers.orders.restapi;
 import io.eventuate.examples.tram.ordersandcustomers.orders.domain.Order;
 import io.eventuate.examples.tram.ordersandcustomers.orders.domain.OrderDetails;
 import io.eventuate.examples.tram.ordersandcustomers.orders.domain.OrderService;
+import io.eventuate.examples.tram.ordersandcustomers.orders.domain.SagaLog;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -20,7 +21,11 @@ public class OrderController {
 
   @PostMapping("/orders")
   public CreateOrderResponse createOrder(@RequestBody CreateOrderRequest createOrderRequest) {
+    SagaLog.info("════════ [SAGA START] POST /orders customer={} total={} ════════",
+            createOrderRequest.customerId(), createOrderRequest.orderTotal().getAmount());
     Order order = orderService.createOrder(new OrderDetails(createOrderRequest.customerId(), createOrderRequest.orderTotal()));
+    SagaLog.info("[HTTP 200] order={} state={}: trả về NGAY cho client, các bước còn lại chạy bất đồng bộ qua Kafka",
+            order.getId(), order.getState());
     return new CreateOrderResponse(order.getId());
   }
 

@@ -1,0 +1,7 @@
+**/build
+**/.gradle
+.git
+.idea
+logs
+aws-fargate-terraform
+deployment

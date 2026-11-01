@@ -1,0 +1,59 @@
+<!--
+  Logging used when the services run under docker-compose (LOGGING_CONFIG=/config/logback.xml).
+
+  logs/saga.log            : ONLY the saga steps, from every service, in one timeline (start here)
+  logs/<service>.log       : everything from one service, including transaction boundaries and SQL
+  console (docker logs)    : same as <service>.log
+-->
+<configuration>
+  <property name="LOG_DIR" value="${LOG_DIR:-/logs}"/>
+  <property name="SVC" value="${SERVICE_NAME:-service}"/>
+
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level [%-20.20thread] %-40.40logger{39} : %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <appender name="SERVICE_FILE" class="ch.qos.logback.core.FileAppender">
+    <file>${LOG_DIR}/${SVC}.log</file>
+    <encoder>
+      <charset>UTF-8</charset>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%-20.20thread] %-40.40logger{39} : %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- prudent: several containers append to the same file safely (file locking) -->
+  <appender name="SAGA_FILE" class="ch.qos.logback.core.FileAppender">
+    <file>${LOG_DIR}/saga.log</file>
+    <prudent>true</prudent>
+    <encoder>
+      <charset>UTF-8</charset>
+      <pattern>%d{HH:mm:ss.SSS} | %-21.21(${SVC}) | %-22.22thread | %-5level | %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Saga steps written by SagaLog / the "saga" logger -->
+  <logger name="saga" level="INFO">
+    <appender-ref ref="SAGA_FILE"/>
+  </logger>
+
+  <!-- Local transaction boundaries: "Creating new transaction ..." / "Committing JPA transaction ..." -->
+  <logger name="org.springframework.orm.jpa.JpaTransactionManager" level="${TX_LOG_LEVEL:-DEBUG}"/>
+  <!-- Business SQL (orders / customer tables). The outbox INSERT goes through JDBC, see saga.log -->
+  <logger name="org.hibernate.SQL" level="${SQL_LOG_LEVEL:-DEBUG}"/>
+
+  <!-- Eventuate Tram: subscriptions, message handling -->
+  <logger name="io.eventuate" level="${EVENTUATE_LOG_LEVEL:-INFO}"/>
+
+  <!-- Quieten very chatty libraries -->
+  <logger name="org.apache.kafka" level="WARN"/>
+  <logger name="org.springframework.web" level="INFO"/>
+  <logger name="io.github.springwolf" level="WARN"/>
+  <logger name="org.mongodb.driver" level="WARN"/>
+
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+    <appender-ref ref="SERVICE_FILE"/>
+  </root>
+</configuration>

@@ -1,6 +1,7 @@
 package io.eventuate.examples.tram.ordersandcustomers.customers.eventhandlers;
 
 import io.eventuate.examples.tram.ordersandcustomers.customers.domain.CustomerService;
+import io.eventuate.examples.tram.ordersandcustomers.customers.domain.SagaLog;
 import io.eventuate.examples.tram.ordersandcustomers.orders.domain.OrderCancelledEvent;
 import io.eventuate.examples.tram.ordersandcustomers.orders.domain.OrderCreatedEvent;
 import io.eventuate.tram.events.subscriber.DomainEventEnvelope;
@@ -20,12 +21,16 @@ public class OrderEventConsumer {
   @EventuateDomainEventHandler(subscriberId = "OrderEventConsumer", channel = "io.eventuate.examples.tram.ordersandcustomers.orders.domain.Order")
   public void handleOrderCreatedEvent(DomainEventEnvelope<OrderCreatedEvent> domainEventEnvelope) {
     OrderCreatedEvent event = domainEventEnvelope.getEvent();
+    SagaLog.info("[NHẬN EVENT] OrderCreatedEvent order={} messageId={} (subscriber=OrderEventConsumer)",
+            domainEventEnvelope.getAggregateId(), domainEventEnvelope.getMessage().getId());
     customerService.reserveCredit(Long.parseLong(domainEventEnvelope.getAggregateId()),
             event.orderDetails().customerId(), event.orderDetails().orderTotal());
   }
 
   @EventuateDomainEventHandler(subscriberId = "OrderEventConsumer", channel = "io.eventuate.examples.tram.ordersandcustomers.orders.domain.Order")
   public void handleOrderCancelledEvent(DomainEventEnvelope<OrderCancelledEvent> domainEventEnvelope) {
+    SagaLog.info("[NHẬN EVENT] OrderCancelledEvent order={} messageId={} (subscriber=OrderEventConsumer)",
+            domainEventEnvelope.getAggregateId(), domainEventEnvelope.getMessage().getId());
     customerService.releaseCredit(Long.parseLong(domainEventEnvelope.getAggregateId()), domainEventEnvelope.getEvent().orderDetails().customerId());
   }
 

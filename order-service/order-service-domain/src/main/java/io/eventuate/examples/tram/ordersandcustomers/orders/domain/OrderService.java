@@ -21,7 +21,13 @@ public class OrderService {
     ResultWithTypedEvents<Order, OrderEvent> orderWithEvents = Order.createOrder(orderDetails);
     Order order = orderWithEvents.getResult();
     orderRepository.save(order);
+    SagaLog.info("[BƯỚC 1/3][Tx1 BEGIN] order={} customer={} total={}: INSERT orders(state=PENDING)",
+            order.getId(), orderDetails.customerId(), orderDetails.orderTotal().getAmount());
     orderEventPublisher.publish(order, orderWithEvents.getEvents());
+    SagaLog.info("[BƯỚC 1/3][OUTBOX] order={}: INSERT message(OrderCreatedEvent) trong CÙNG transaction với orders",
+            order.getId());
+    SagaLog.afterCommit("[BƯỚC 1/3][Tx1 COMMIT] order={} state=PENDING (semantic lock). CDC sẽ đọc binlog và đẩy OrderCreatedEvent lên Kafka",
+            order.getId());
     return order;
   }
 
@@ -29,16 +35,26 @@ public class OrderService {
     Order order = orderRepository
             .findById(orderId)
             .orElseThrow(() -> new IllegalArgumentException("order with id %s not found".formatted(orderId)));
+    OrderState before = order.getState();
     order.noteCreditReserved();
+    SagaLog.info("[BƯỚC 3/3][Tx3 BEGIN] order={}: state {} -> {} (retriable transaction sau pivot)",
+            orderId, before, order.getState());
     orderEventPublisher.publish(order, new OrderApprovedEvent(order.getOrderDetails()));
+    SagaLog.afterCommit("[BƯỚC 3/3][Tx3 COMMIT] order={} APPROVED + OrderApprovedEvent vào outbox. SAGA KẾT THÚC: THÀNH CÔNG",
+            orderId);
   }
 
   public void rejectOrder(Long orderId, RejectionReason rejectionReason) {
     Order order = orderRepository
             .findById(orderId)
             .orElseThrow(() -> new IllegalArgumentException("order with id %s not found".formatted(orderId)));
+    OrderState before = order.getState();
     order.noteCreditReservationFailed(rejectionReason);
+    SagaLog.warn("[BÙ][Tx3 BEGIN] order={}: compensating transaction cho Tx1, state {} -> {} reason={}",
+            orderId, before, order.getState(), rejectionReason);
     orderEventPublisher.publish(order, new OrderRejectedEvent(order.getOrderDetails()));
+    SagaLog.afterCommit("[BÙ][Tx3 COMMIT] order={} REJECTED ({}) + OrderRejectedEvent vào outbox. SAGA KẾT THÚC: ĐÃ BÙ",
+            orderId, rejectionReason);
   }
 
   @Transactional
@@ -46,8 +62,16 @@ public class OrderService {
     Order order = orderRepository
             .findById(orderId)
             .orElseThrow(() -> new IllegalArgumentException("order with id %s not found".formatted(orderId)));
-    order.cancel();
+    SagaLog.info("[HỦY ĐƠN][Tx BEGIN] order={} state={}: yêu cầu cancel", orderId, order.getState());
+    try {
+      order.cancel();
+    } catch (PendingOrderCantBeCancelledException e) {
+      SagaLog.warn("[HỦY ĐƠN][SEMANTIC LOCK] order={} đang PENDING, saga Create Order chưa xong nên không được hủy", orderId);
+      throw e;
+    }
     orderEventPublisher.publish(order, new OrderCancelledEvent(order.getOrderDetails()));
+    SagaLog.afterCommit("[HỦY ĐƠN][Tx COMMIT] order={} CANCELLED + OrderCancelledEvent vào outbox. Customer Service sẽ trả lại tín dụng",
+            orderId);
     return order;
   }
 
