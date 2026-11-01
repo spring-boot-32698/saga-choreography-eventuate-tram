@@ -1,0 +1,1528 @@
+{
+  "info": {
+    "_postman_id": "0580adbf-86d2-411d-a851-6bfab1516ed0",
+    "name": "Saga Choreography (Eventuate Tram) - local",
+    "description": "Kiểm thử saga Create Order trên stack docker-compose (xem docker-local/README.md).\n\nChạy cả collection bằng Collection Runner (hoặc `npx newman run`) để các request \"Chờ saga xong\" tự lặp tới khi đơn rời PENDING. Mở `tail -f logs/saga.log` song song để xem từng bước saga ở 3 service.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "0. Kiểm tra hệ thống",
+      "item": [
+        {
+          "name": "0.1 API Gateway health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/actuator/health",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "0.2 Order Service health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{orderService}}/actuator/health",
+              "host": [
+                "{{orderService}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "0.3 Customer Service health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{customerService}}/actuator/health",
+              "host": [
+                "{{customerService}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "0.4 Order History Service health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{orderHistoryService}}/actuator/health",
+              "host": [
+                "{{orderHistoryService}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1. Happy path: đủ tín dụng -> APPROVED",
+      "description": "creditLimit 15.00, order 12.34. Tx1 (Order) -> Tx2 pivot (Customer giữ tín dụng) -> Tx3 (Order APPROVED).",
+      "item": [
+        {
+          "name": "1.1 Tạo customer Alice (creditLimit 15.00)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/customers",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "customers"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Alice\",\n  \"creditLimit\": {\n    \"amount\": 15.0\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const id = pm.response.json().customerId;",
+                  "pm.test('Có customerId', () => pm.expect(id).to.be.a('number'));",
+                  "pm.collectionVariables.set('c1', id);",
+                  "console.log('c1 =', id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.2 Tạo order 12.34 cho {{c1}}",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/orders",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": {{c1}},\n  \"orderTotal\": {\n    \"amount\": 12.34\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Bước 1 của saga (Tx1): lưu Order ở trạng thái PENDING và ghi OrderCreatedEvent vào bảng MESSAGE trong cùng transaction. HTTP trả về ngay, chưa chờ Customer Service."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200: Order Service trả lời ngay sau Tx1', () => pm.response.to.have.status(200));",
+                  "const id = pm.response.json().orderId;",
+                  "pm.test('Có orderId', () => pm.expect(id).to.be.a('number'));",
+                  "pm.collectionVariables.set('o1', id);",
+                  "console.log('o1 =', id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.3 Xem order ngay lập tức (thường còn PENDING)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/orders/{{o1}}",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders",
+                "{{o1}}"
+              ]
+            },
+            "description": "Gọi ngay sau khi tạo: thường thấy PENDING, chứng tỏ saga chưa xong. Đây là hệ quả của việc saga thiếu Isolation (ACD)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json().orderState;",
+                  "console.log('Trạng thái ngay sau khi tạo:', s);",
+                  "pm.test('Trạng thái hợp lệ', () => pm.expect(['PENDING', 'APPROVED', 'REJECTED']).to.include(s));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.4 Chờ saga xong: order {{o1}}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/orders/{{o1}}",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders",
+                "{{o1}}"
+              ]
+            },
+            "description": "Lặp lại tới khi orderState khác PENDING (tối đa 40 lần x 500ms) rồi kiểm tra kết quả."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Saga chạy bất đồng bộ: lặp lại request này tới khi đơn rời PENDING.",
+                  "// (Vòng lặp chỉ hoạt động trong Collection Runner / newman. Gửi tay thì bấm Send lại.)",
+                  "const MAX_TRIES = 40, DELAY_MS = 500;",
+                  "const key = 'poll_' + pm.info.requestId;",
+                  "const tries = Number(pm.collectionVariables.get(key) || 0) + 1;",
+                  "const body = pm.response.json();",
+                  "const goNext = (name) => (pm.execution && pm.execution.setNextRequest)",
+                  "    ? pm.execution.setNextRequest(name) : postman.setNextRequest(name);",
+                  "",
+                  "if (body.orderState === 'PENDING' && tries < MAX_TRIES) {",
+                  "    pm.collectionVariables.set(key, tries);",
+                  "    console.log(`order ${body.orderId} vẫn PENDING (lần ${tries}), thử lại sau ${DELAY_MS}ms`);",
+                  "    goNext(pm.info.requestName);",
+                  "    setTimeout(() => {}, DELAY_MS);",
+                  "} else {",
+                  "    pm.collectionVariables.unset(key);",
+                  "    console.log(`order ${body.orderId}: ${body.orderState} sau ${tries} lần hỏi`);",
+                  "    pm.test('Saga đã kết thúc (không còn PENDING)', () => pm.expect(body.orderState).to.not.eql('PENDING'));",
+                  "    pm.test('APPROVED', () => pm.expect(body.orderState).to.eql('APPROVED'));",
+                  "    pm.test('Không có rejectionReason', () => pm.expect(body.rejectionReason).to.be.null);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.5 Đợi 1000ms (cho Order History nhận OrderApprovedEvent)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/actuator/health",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 1000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Gateway sống', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.6 CQRS view: order history của {{c1}}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/customers/{{c1}}/orderhistory",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "customers",
+                "{{c1}}",
+                "orderhistory"
+              ]
+            },
+            "description": "Order History Service không tham gia saga, nó chỉ nghe event để dựng view đọc trong MongoDB (CQRS)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Order History cập nhật từ event, nên có thể trễ hơn Order Service một chút",
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const orders = pm.response.json().orders || {};",
+                  "const o = orders[pm.collectionVariables.get('o1')];",
+                  "console.log('View trong MongoDB:', JSON.stringify(o));",
+                  "pm.test('View có order với state APPROVED', () => {",
+                  "    pm.expect(o, 'order chưa có trong view (eventual consistency, thử Send lại)').to.exist;",
+                  "    pm.expect(o.state).to.eql('APPROVED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Vượt hạn mức -> REJECTED (giao dịch bù)",
+      "description": "creditLimit 15.00, giữ 12.34 cho đơn đầu, đơn thứ hai 5.00 > 2.66 còn lại. Customer phát CustomerCreditReservationFailedEvent, Order Service chạy compensating transaction PENDING -> REJECTED.",
+      "item": [
+        {
+          "name": "2.1 Tạo customer Bob (creditLimit 15.00)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/customers",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "customers"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Bob\",\n  \"creditLimit\": {\n    \"amount\": 15.0\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const id = pm.response.json().customerId;",
+                  "pm.test('Có customerId', () => pm.expect(id).to.be.a('number'));",
+                  "pm.collectionVariables.set('c2', id);",
+                  "console.log('c2 =', id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.2 Tạo order 12.34 cho {{c2}}",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/orders",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": {{c2}},\n  \"orderTotal\": {\n    \"amount\": 12.34\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Bước 1 của saga (Tx1): lưu Order ở trạng thái PENDING và ghi OrderCreatedEvent vào bảng MESSAGE trong cùng transaction. HTTP trả về ngay, chưa chờ Customer Service."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200: Order Service trả lời ngay sau Tx1', () => pm.response.to.have.status(200));",
+                  "const id = pm.response.json().orderId;",
+                  "pm.test('Có orderId', () => pm.expect(id).to.be.a('number'));",
+                  "pm.collectionVariables.set('o2a', id);",
+                  "console.log('o2a =', id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.3 Chờ saga xong: order {{o2a}}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/orders/{{o2a}}",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders",
+                "{{o2a}}"
+              ]
+            },
+            "description": "Lặp lại tới khi orderState khác PENDING (tối đa 40 lần x 500ms) rồi kiểm tra kết quả."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Saga chạy bất đồng bộ: lặp lại request này tới khi đơn rời PENDING.",
+                  "// (Vòng lặp chỉ hoạt động trong Collection Runner / newman. Gửi tay thì bấm Send lại.)",
+                  "const MAX_TRIES = 40, DELAY_MS = 500;",
+                  "const key = 'poll_' + pm.info.requestId;",
+                  "const tries = Number(pm.collectionVariables.get(key) || 0) + 1;",
+                  "const body = pm.response.json();",
+                  "const goNext = (name) => (pm.execution && pm.execution.setNextRequest)",
+                  "    ? pm.execution.setNextRequest(name) : postman.setNextRequest(name);",
+                  "",
+                  "if (body.orderState === 'PENDING' && tries < MAX_TRIES) {",
+                  "    pm.collectionVariables.set(key, tries);",
+                  "    console.log(`order ${body.orderId} vẫn PENDING (lần ${tries}), thử lại sau ${DELAY_MS}ms`);",
+                  "    goNext(pm.info.requestName);",
+                  "    setTimeout(() => {}, DELAY_MS);",
+                  "} else {",
+                  "    pm.collectionVariables.unset(key);",
+                  "    console.log(`order ${body.orderId}: ${body.orderState} sau ${tries} lần hỏi`);",
+                  "    pm.test('Saga đã kết thúc (không còn PENDING)', () => pm.expect(body.orderState).to.not.eql('PENDING'));",
+                  "    pm.test('Đơn đầu APPROVED', () => pm.expect(body.orderState).to.eql('APPROVED'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.4 Tạo order 5.00 cho {{c2}}",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/orders",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": {{c2}},\n  \"orderTotal\": {\n    \"amount\": 5.0\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Bước 1 của saga (Tx1): lưu Order ở trạng thái PENDING và ghi OrderCreatedEvent vào bảng MESSAGE trong cùng transaction. HTTP trả về ngay, chưa chờ Customer Service."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200: Order Service trả lời ngay sau Tx1', () => pm.response.to.have.status(200));",
+                  "const id = pm.response.json().orderId;",
+                  "pm.test('Có orderId', () => pm.expect(id).to.be.a('number'));",
+                  "pm.collectionVariables.set('o2b', id);",
+                  "console.log('o2b =', id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.5 Chờ saga xong: order {{o2b}}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/orders/{{o2b}}",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders",
+                "{{o2b}}"
+              ]
+            },
+            "description": "Lặp lại tới khi orderState khác PENDING (tối đa 40 lần x 500ms) rồi kiểm tra kết quả."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Saga chạy bất đồng bộ: lặp lại request này tới khi đơn rời PENDING.",
+                  "// (Vòng lặp chỉ hoạt động trong Collection Runner / newman. Gửi tay thì bấm Send lại.)",
+                  "const MAX_TRIES = 40, DELAY_MS = 500;",
+                  "const key = 'poll_' + pm.info.requestId;",
+                  "const tries = Number(pm.collectionVariables.get(key) || 0) + 1;",
+                  "const body = pm.response.json();",
+                  "const goNext = (name) => (pm.execution && pm.execution.setNextRequest)",
+                  "    ? pm.execution.setNextRequest(name) : postman.setNextRequest(name);",
+                  "",
+                  "if (body.orderState === 'PENDING' && tries < MAX_TRIES) {",
+                  "    pm.collectionVariables.set(key, tries);",
+                  "    console.log(`order ${body.orderId} vẫn PENDING (lần ${tries}), thử lại sau ${DELAY_MS}ms`);",
+                  "    goNext(pm.info.requestName);",
+                  "    setTimeout(() => {}, DELAY_MS);",
+                  "} else {",
+                  "    pm.collectionVariables.unset(key);",
+                  "    console.log(`order ${body.orderId}: ${body.orderState} sau ${tries} lần hỏi`);",
+                  "    pm.test('Saga đã kết thúc (không còn PENDING)', () => pm.expect(body.orderState).to.not.eql('PENDING'));",
+                  "    pm.test('REJECTED', () => pm.expect(body.orderState).to.eql('REJECTED'));",
+                  "    pm.test('Lý do INSUFFICIENT_CREDIT', () => pm.expect(body.rejectionReason).to.eql('INSUFFICIENT_CREDIT'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.6 Đợi 1000ms (cho Order History nhận OrderRejectedEvent)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/actuator/health",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 1000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Gateway sống', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.7 CQRS view: order history của {{c2}}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/customers/{{c2}}/orderhistory",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "customers",
+                "{{c2}}",
+                "orderhistory"
+              ]
+            },
+            "description": "Order History Service không tham gia saga, nó chỉ nghe event để dựng view đọc trong MongoDB (CQRS)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Order History cập nhật từ event, nên có thể trễ hơn Order Service một chút",
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const orders = pm.response.json().orders || {};",
+                  "const o = orders[pm.collectionVariables.get('o2b')];",
+                  "console.log('View trong MongoDB:', JSON.stringify(o));",
+                  "pm.test('View có order với state REJECTED', () => {",
+                  "    pm.expect(o, 'order chưa có trong view (eventual consistency, thử Send lại)').to.exist;",
+                  "    pm.expect(o.state).to.eql('REJECTED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Customer không tồn tại -> REJECTED",
+      "description": "Order Service không có dữ liệu customer nên vẫn tạo đơn PENDING. Customer Service phát CustomerValidationFailedEvent.",
+      "item": [
+        {
+          "name": "3.1 Tạo order cho customerId 999999",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/orders",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": 999999,\n  \"orderTotal\": {\n    \"amount\": 1.0\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200 (Order Service không tự kiểm tra customer)', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('o3', pm.response.json().orderId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3.2 Chờ saga xong: order {{o3}}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/orders/{{o3}}",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders",
+                "{{o3}}"
+              ]
+            },
+            "description": "Lặp lại tới khi orderState khác PENDING (tối đa 40 lần x 500ms) rồi kiểm tra kết quả."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Saga chạy bất đồng bộ: lặp lại request này tới khi đơn rời PENDING.",
+                  "// (Vòng lặp chỉ hoạt động trong Collection Runner / newman. Gửi tay thì bấm Send lại.)",
+                  "const MAX_TRIES = 40, DELAY_MS = 500;",
+                  "const key = 'poll_' + pm.info.requestId;",
+                  "const tries = Number(pm.collectionVariables.get(key) || 0) + 1;",
+                  "const body = pm.response.json();",
+                  "const goNext = (name) => (pm.execution && pm.execution.setNextRequest)",
+                  "    ? pm.execution.setNextRequest(name) : postman.setNextRequest(name);",
+                  "",
+                  "if (body.orderState === 'PENDING' && tries < MAX_TRIES) {",
+                  "    pm.collectionVariables.set(key, tries);",
+                  "    console.log(`order ${body.orderId} vẫn PENDING (lần ${tries}), thử lại sau ${DELAY_MS}ms`);",
+                  "    goNext(pm.info.requestName);",
+                  "    setTimeout(() => {}, DELAY_MS);",
+                  "} else {",
+                  "    pm.collectionVariables.unset(key);",
+                  "    console.log(`order ${body.orderId}: ${body.orderState} sau ${tries} lần hỏi`);",
+                  "    pm.test('Saga đã kết thúc (không còn PENDING)', () => pm.expect(body.orderState).to.not.eql('PENDING'));",
+                  "    pm.test('REJECTED', () => pm.expect(body.orderState).to.eql('REJECTED'));",
+                  "    pm.test('Lý do UNKNOWN_CUSTOMER', () => pm.expect(body.rejectionReason).to.eql('UNKNOWN_CUSTOMER'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Hủy đơn đã APPROVED -> trả lại tín dụng",
+      "description": "POST /orders/{id}/cancel gọi thẳng Order Service vì API Gateway không có route này. OrderCancelledEvent làm Customer Service gọi releaseCredit().",
+      "item": [
+        {
+          "name": "4.1 Tạo customer Carol (creditLimit 15.00)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/customers",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "customers"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Carol\",\n  \"creditLimit\": {\n    \"amount\": 15.0\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const id = pm.response.json().customerId;",
+                  "pm.test('Có customerId', () => pm.expect(id).to.be.a('number'));",
+                  "pm.collectionVariables.set('c4', id);",
+                  "console.log('c4 =', id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.2 Tạo order 12.34 cho {{c4}}",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/orders",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": {{c4}},\n  \"orderTotal\": {\n    \"amount\": 12.34\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Bước 1 của saga (Tx1): lưu Order ở trạng thái PENDING và ghi OrderCreatedEvent vào bảng MESSAGE trong cùng transaction. HTTP trả về ngay, chưa chờ Customer Service."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200: Order Service trả lời ngay sau Tx1', () => pm.response.to.have.status(200));",
+                  "const id = pm.response.json().orderId;",
+                  "pm.test('Có orderId', () => pm.expect(id).to.be.a('number'));",
+                  "pm.collectionVariables.set('o4', id);",
+                  "console.log('o4 =', id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.3 Chờ saga xong: order {{o4}}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/orders/{{o4}}",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders",
+                "{{o4}}"
+              ]
+            },
+            "description": "Lặp lại tới khi orderState khác PENDING (tối đa 40 lần x 500ms) rồi kiểm tra kết quả."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Saga chạy bất đồng bộ: lặp lại request này tới khi đơn rời PENDING.",
+                  "// (Vòng lặp chỉ hoạt động trong Collection Runner / newman. Gửi tay thì bấm Send lại.)",
+                  "const MAX_TRIES = 40, DELAY_MS = 500;",
+                  "const key = 'poll_' + pm.info.requestId;",
+                  "const tries = Number(pm.collectionVariables.get(key) || 0) + 1;",
+                  "const body = pm.response.json();",
+                  "const goNext = (name) => (pm.execution && pm.execution.setNextRequest)",
+                  "    ? pm.execution.setNextRequest(name) : postman.setNextRequest(name);",
+                  "",
+                  "if (body.orderState === 'PENDING' && tries < MAX_TRIES) {",
+                  "    pm.collectionVariables.set(key, tries);",
+                  "    console.log(`order ${body.orderId} vẫn PENDING (lần ${tries}), thử lại sau ${DELAY_MS}ms`);",
+                  "    goNext(pm.info.requestName);",
+                  "    setTimeout(() => {}, DELAY_MS);",
+                  "} else {",
+                  "    pm.collectionVariables.unset(key);",
+                  "    console.log(`order ${body.orderId}: ${body.orderState} sau ${tries} lần hỏi`);",
+                  "    pm.test('Saga đã kết thúc (không còn PENDING)', () => pm.expect(body.orderState).to.not.eql('PENDING'));",
+                  "    pm.test('APPROVED', () => pm.expect(body.orderState).to.eql('APPROVED'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.4 Hủy order {{o4}} (qua Order Service)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{orderService}}/orders/{{o4}}/cancel",
+              "host": [
+                "{{orderService}}"
+              ],
+              "path": [
+                "orders",
+                "{{o4}}",
+                "cancel"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('CANCELLED', () => pm.expect(pm.response.json().orderState).to.eql('CANCELLED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.5 Đợi 1500ms (cho Customer Service nhận OrderCancelledEvent và trả tín dụng)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/actuator/health",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 1500);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Gateway sống', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.6 Tạo order 12.34 cho {{c4}}",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/orders",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": {{c4}},\n  \"orderTotal\": {\n    \"amount\": 12.34\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Bước 1 của saga (Tx1): lưu Order ở trạng thái PENDING và ghi OrderCreatedEvent vào bảng MESSAGE trong cùng transaction. HTTP trả về ngay, chưa chờ Customer Service."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200: Order Service trả lời ngay sau Tx1', () => pm.response.to.have.status(200));",
+                  "const id = pm.response.json().orderId;",
+                  "pm.test('Có orderId', () => pm.expect(id).to.be.a('number'));",
+                  "pm.collectionVariables.set('o4b', id);",
+                  "console.log('o4b =', id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.7 Chờ saga xong: order {{o4b}}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/orders/{{o4b}}",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders",
+                "{{o4b}}"
+              ]
+            },
+            "description": "Lặp lại tới khi orderState khác PENDING (tối đa 40 lần x 500ms) rồi kiểm tra kết quả."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Saga chạy bất đồng bộ: lặp lại request này tới khi đơn rời PENDING.",
+                  "// (Vòng lặp chỉ hoạt động trong Collection Runner / newman. Gửi tay thì bấm Send lại.)",
+                  "const MAX_TRIES = 40, DELAY_MS = 500;",
+                  "const key = 'poll_' + pm.info.requestId;",
+                  "const tries = Number(pm.collectionVariables.get(key) || 0) + 1;",
+                  "const body = pm.response.json();",
+                  "const goNext = (name) => (pm.execution && pm.execution.setNextRequest)",
+                  "    ? pm.execution.setNextRequest(name) : postman.setNextRequest(name);",
+                  "",
+                  "if (body.orderState === 'PENDING' && tries < MAX_TRIES) {",
+                  "    pm.collectionVariables.set(key, tries);",
+                  "    console.log(`order ${body.orderId} vẫn PENDING (lần ${tries}), thử lại sau ${DELAY_MS}ms`);",
+                  "    goNext(pm.info.requestName);",
+                  "    setTimeout(() => {}, DELAY_MS);",
+                  "} else {",
+                  "    pm.collectionVariables.unset(key);",
+                  "    console.log(`order ${body.orderId}: ${body.orderState} sau ${tries} lần hỏi`);",
+                  "    pm.test('Saga đã kết thúc (không còn PENDING)', () => pm.expect(body.orderState).to.not.eql('PENDING'));",
+                  "    pm.test('APPROVED: tín dụng đã được trả lại', () => pm.expect(body.orderState).to.eql('APPROVED'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.8 CQRS view: order history của {{c4}}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/customers/{{c4}}/orderhistory",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "customers",
+                "{{c4}}",
+                "orderhistory"
+              ]
+            },
+            "description": "Order History Service không tham gia saga, nó chỉ nghe event để dựng view đọc trong MongoDB (CQRS)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Order History cập nhật từ event, nên có thể trễ hơn Order Service một chút",
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const orders = pm.response.json().orders || {};",
+                  "const o = orders[pm.collectionVariables.get('o4')];",
+                  "console.log('View trong MongoDB:', JSON.stringify(o));",
+                  "pm.test('View có order với state CANCELLED', () => {",
+                  "    pm.expect(o, 'order chưa có trong view (eventual consistency, thử Send lại)').to.exist;",
+                  "    pm.expect(o.state).to.eql('CANCELLED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Hủy đơn khi còn PENDING -> semantic lock",
+      "description": "Gọi cancel ngay sau khi tạo. Nếu saga chưa xong, Order.cancel() ném PendingOrderCantBeCancelledException (HTTP 500). Nếu saga đã kịp xong, cancel thành công (HTTP 200). Xem dòng [SEMANTIC LOCK] trong logs/saga.log.",
+      "item": [
+        {
+          "name": "5.1 Tạo customer Dave (creditLimit 15.00)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/customers",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "customers"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Dave\",\n  \"creditLimit\": {\n    \"amount\": 15.0\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "const id = pm.response.json().customerId;",
+                  "pm.test('Có customerId', () => pm.expect(id).to.be.a('number'));",
+                  "pm.collectionVariables.set('c5', id);",
+                  "console.log('c5 =', id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "5.2 Tạo order 1.00 cho {{c5}}",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/orders",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": {{c5}},\n  \"orderTotal\": {\n    \"amount\": 1.0\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Bước 1 của saga (Tx1): lưu Order ở trạng thái PENDING và ghi OrderCreatedEvent vào bảng MESSAGE trong cùng transaction. HTTP trả về ngay, chưa chờ Customer Service."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200: Order Service trả lời ngay sau Tx1', () => pm.response.to.have.status(200));",
+                  "const id = pm.response.json().orderId;",
+                  "pm.test('Có orderId', () => pm.expect(id).to.be.a('number'));",
+                  "pm.collectionVariables.set('o5', id);",
+                  "console.log('o5 =', id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "5.3 Hủy NGAY order {{o5}}",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{orderService}}/orders/{{o5}}/cancel",
+              "host": [
+                "{{orderService}}"
+              ],
+              "path": [
+                "orders",
+                "{{o5}}",
+                "cancel"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const code = pm.response.code;",
+                  "console.log(code === 500 ? 'Bị từ chối: đơn còn PENDING (semantic lock)' : 'Saga đã xong trước khi cancel tới, kết quả: ' + pm.response.text());",
+                  "pm.test('500 (PENDING, bị khóa) hoặc 200 (saga đã xong)', () => pm.expect([200, 500]).to.include(code));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "5.4 Chờ saga xong: order {{o5}}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/orders/{{o5}}",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders",
+                "{{o5}}"
+              ]
+            },
+            "description": "Lặp lại tới khi orderState khác PENDING (tối đa 40 lần x 500ms) rồi kiểm tra kết quả."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Saga chạy bất đồng bộ: lặp lại request này tới khi đơn rời PENDING.",
+                  "// (Vòng lặp chỉ hoạt động trong Collection Runner / newman. Gửi tay thì bấm Send lại.)",
+                  "const MAX_TRIES = 40, DELAY_MS = 500;",
+                  "const key = 'poll_' + pm.info.requestId;",
+                  "const tries = Number(pm.collectionVariables.get(key) || 0) + 1;",
+                  "const body = pm.response.json();",
+                  "const goNext = (name) => (pm.execution && pm.execution.setNextRequest)",
+                  "    ? pm.execution.setNextRequest(name) : postman.setNextRequest(name);",
+                  "",
+                  "if (body.orderState === 'PENDING' && tries < MAX_TRIES) {",
+                  "    pm.collectionVariables.set(key, tries);",
+                  "    console.log(`order ${body.orderId} vẫn PENDING (lần ${tries}), thử lại sau ${DELAY_MS}ms`);",
+                  "    goNext(pm.info.requestName);",
+                  "    setTimeout(() => {}, DELAY_MS);",
+                  "} else {",
+                  "    pm.collectionVariables.unset(key);",
+                  "    console.log(`order ${body.orderId}: ${body.orderState} sau ${tries} lần hỏi`);",
+                  "    pm.test('Saga đã kết thúc (không còn PENDING)', () => pm.expect(body.orderState).to.not.eql('PENDING'));",
+                  "    pm.test('Trạng thái cuối hợp lệ', () => pm.expect(['APPROVED', 'CANCELLED']).to.include(body.orderState));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "6. Tra cứu (gửi tay)",
+      "item": [
+        {
+          "name": "6.1 Danh sách customers",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/customers",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "customers"
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "6.2 Một customer",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/customers/{{c1}}",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "customers",
+                "{{c1}}"
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "6.3 Danh sách orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/orders",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "6.4 Một order",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/orders/{{o1}}",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders",
+                "{{o1}}"
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "6.5 Order history (CQRS)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gateway}}/customers/{{c1}}/orderhistory",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "customers",
+                "{{c1}}",
+                "orderhistory"
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "6.6 Tạo order tùy ý",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{gateway}}/orders",
+              "host": [
+                "{{gateway}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": {{c1}},\n  \"orderTotal\": {\n    \"amount\": 1.5\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('o1', pm.response.json().orderId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "6.7 Hủy order tùy ý (Order Service)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{orderService}}/orders/{{o1}}/cancel",
+              "host": [
+                "{{orderService}}"
+              ],
+              "path": [
+                "orders",
+                "{{o1}}",
+                "cancel"
+              ]
+            }
+          },
+          "event": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "gateway",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "orderService",
+      "value": "http://localhost:8081"
+    },
+    {
+      "key": "customerService",
+      "value": "http://localhost:8082"
+    },
+    {
+      "key": "orderHistoryService",
+      "value": "http://localhost:8083"
+    },
+    {
+      "key": "c1",
+      "value": ""
+    },
+    {
+      "key": "o1",
+      "value": ""
+    },
+    {
+      "key": "c2",
+      "value": ""
+    },
+    {
+      "key": "o2a",
+      "value": ""
+    },
+    {
+      "key": "o2b",
+      "value": ""
+    },
+    {
+      "key": "o3",
+      "value": ""
+    },
+    {
+      "key": "c4",
+      "value": ""
+    },
+    {
+      "key": "o4",
+      "value": ""
+    },
+    {
+      "key": "o4b",
+      "value": ""
+    },
+    {
+      "key": "c5",
+      "value": ""
+    },
+    {
+      "key": "o5",
+      "value": ""
+    }
+  ]
+}

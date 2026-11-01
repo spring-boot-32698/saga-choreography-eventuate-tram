@@ -76,6 +76,35 @@ Lọc theo một đơn: `grep -E 'order=3( |:|$)' logs/saga.log`
 
 API Gateway không có route cho `POST /orders/{id}/cancel`, nên script gọi thẳng Order Service ở cổng 8081.
 
+## Test bằng Postman
+
+Import file `docker-local/postman/saga-choreography.postman_collection.json` vào Postman
+(File > Import). Collection có sẵn biến `gateway` (8080), `orderService` (8081), `customerService` (8082),
+`orderHistoryService` (8083).
+
+| Folder | Kiểm tra |
+|---|---|
+| 0. Kiểm tra hệ thống | Health của gateway và 3 service |
+| 1. Happy path | Đơn 12.34 / hạn mức 15.00 -> `APPROVED`, view Mongo cập nhật |
+| 2. Vượt hạn mức | Đơn thứ hai 5.00 -> `REJECTED` + `INSUFFICIENT_CREDIT` (giao dịch bù) |
+| 3. Customer không tồn tại | `REJECTED` + `UNKNOWN_CUSTOMER` |
+| 4. Hủy đơn đã duyệt | `CANCELLED`, sau đó đặt lại 12.34 vẫn `APPROVED` (tín dụng đã được trả) |
+| 5. Hủy khi PENDING | HTTP 500 (semantic lock) hoặc 200 nếu saga đã kịp xong |
+| 6. Tra cứu | Request gửi tay, không có assertion |
+
+Nên chạy bằng **Collection Runner** (chuột phải collection > Run): các request "Chờ saga xong" sẽ tự lặp
+tới khi đơn rời `PENDING` (tối đa 40 lần x 500ms). Nếu gửi từng request bằng tay, request đó chỉ chạy một
+lần; thấy `PENDING` thì bấm Send lại. `customerId` / `orderId` được tự lưu vào biến collection
+(`c1`, `o1`, ...) nên các request sau dùng lại được.
+
+Chạy không cần mở Postman:
+
+```bash
+npx -y newman@6.2.1 run docker-local/postman/saga-choreography.postman_collection.json
+```
+
+Mở `tail -f logs/saga.log` song song để xem từng bước saga ở cả 3 service trong lúc collection chạy.
+
 ## Thí nghiệm nên tự làm
 
 **1. Saga sống sót khi một service chết** (thấy được tính bất đồng bộ và độ bền của Kafka)
